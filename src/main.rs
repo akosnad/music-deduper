@@ -1,16 +1,39 @@
 use anyhow::anyhow;
 use clap::Parser;
+use human_bytes::human_bytes;
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
-#[command(author = "akosnad", about = "Music library duplicate finder")]
+#[command()]
+/// Music library duplicate finder, using fingerprinting
 struct Args {
     #[arg(short, long)]
+    /// The directory to search for duplicates in
     cwd: Option<String>,
+
+    #[arg(short, long)]
+    /// Delete the duplicates from the filesystem
+    delete: bool,
+
+    #[arg(short, long)]
+    /// Show detailed output
+    verbose: bool,
+
+    #[arg(short, long)]
+    /// Don't show file paths
+    quiet: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    simple_logger::SimpleLogger::new().env().init()?;
+
+    if args.verbose {
+        log::set_max_level(log::LevelFilter::Debug);
+    } else {
+        log::set_max_level(log::LevelFilter::Info);
+    }
 
     if let Some(cwd) = args.cwd {
         let path = std::path::Path::new(&cwd);
@@ -33,8 +56,37 @@ fn main() -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    let mut processor = music_deduper::Processor::new(std::env::current_dir()?, files)?;
-    processor.process()?;
+    let mut processor = music_deduper::Processor::new(files)?;
+    let to_delete = processor.process()?;
+
+    let to_delete_size = to_delete
+        .iter()
+        .map(|f| f.metadata().unwrap().len())
+        .sum::<u64>();
+
+    if args.delete {
+        for file in &to_delete {
+            if !args.quiet {
+                println!("{}", file.path().display());
+            }
+            std::fs::remove_file(file.path())?;
+        }
+        log::info!(
+            "{} duplicates deleted with size: {}",
+            to_delete.len(),
+            human_bytes(to_delete_size as f64)
+        );
+        return Ok(());
+    } else if !args.quiet {
+        for file in &to_delete {
+            println!("{}", file.path().display());
+        }
+    }
+    log::info!(
+        "{} duplicates found with size: {}",
+        to_delete.len(),
+        human_bytes(to_delete_size as f64)
+    );
 
     Ok(())
 }
