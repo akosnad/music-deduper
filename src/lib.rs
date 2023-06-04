@@ -1,5 +1,5 @@
 use blake3::Hash;
-use ffmpeg_next::frame::Audio;
+use itertools::Itertools;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::path::{Path, PathBuf};
 use walkdir::DirEntry;
@@ -16,10 +16,35 @@ impl Processor {
     }
 
     pub fn process(&mut self) -> anyhow::Result<()> {
-        let hashes = self
-            .files
+        let results = self.generate_hashes();
+
+        let dupes = results
+            .iter()
+            .duplicates_by(|(_, h1)| h1.as_bytes())
+            .collect_vec();
+
+        for dupe in &dupes {
+            results
+                .iter()
+                .filter(|(p, h)| {
+                    h.as_bytes() == dupe.1.as_bytes() && p.path().to_str() != dupe.0.path().to_str()
+                })
+                .for_each(|(p, _)| {
+                    println!(
+                        "{} is a duplicate of {}",
+                        p.path().display(),
+                        dupe.0.path().display()
+                    );
+                });
+        }
+
+        Ok(())
+    }
+
+    fn generate_hashes(&self) -> Vec<(&DirEntry, Hash)> {
+        self.files
             .par_iter()
-            .map(|f| -> anyhow::Result<(&Path, Hash)> {
+            .map(|f| -> anyhow::Result<(&DirEntry, Hash)> {
                 let mut ictx = ffmpeg_next::format::input(&f.path())?;
                 let input = ictx
                     .streams()
@@ -27,39 +52,17 @@ impl Processor {
                     .ok_or(ffmpeg_next::Error::StreamNotFound)?;
                 let audio_stream_index = input.index();
 
-                let ctx_decoder = ffmpeg_next::codec::Context::from_parameters(input.parameters())?;
-                let mut decoder = ctx_decoder.decoder().audio()?;
-
                 let mut hasher = blake3::Hasher::new();
 
-                let mut process_packets = |decoder: &mut ffmpeg_next::decoder::Audio| {
-                    let mut decoded = Audio::empty();
-                    while decoder.receive_frame(&mut decoded).is_ok() {
-                        let data = decoded.data(0);
-                        hasher.update(data);
-                    }
-                };
-
-                for (stream, packet) in ictx.packets() {
+                ictx.packets().for_each(|(stream, packet)| {
                     if stream.index() == audio_stream_index {
-                        decoder.send_packet(&packet)?;
-                        process_packets(&mut decoder);
+                        packet.data().map(|data| hasher.update(data));
                     }
-                }
+                });
 
-                decoder.send_eof()?;
-                decoder.flush();
-                process_packets(&mut decoder);
-
-                Ok((f.path(), hasher.finalize()))
+                Ok((f, hasher.finalize()))
             })
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
-
-        for (path, hash) in hashes {
-            println!("{}: {}", path.display(), hash);
-        }
-
-        Ok(())
+            .filter_map(Result::ok)
+            .collect()
     }
 }
