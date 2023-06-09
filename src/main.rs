@@ -15,6 +15,10 @@ struct Args {
     /// Delete the duplicates from the filesystem
     delete: bool,
 
+    #[arg(long, name = "PATH")]
+    /// Print hash of a song
+    hash: Option<String>,
+
     #[arg(short, long)]
     /// Show detailed output
     verbose: bool,
@@ -44,7 +48,17 @@ fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(path)?;
     }
 
-    //let mut duplicates = HashMap::new();
+    if let Some(file_to_hash) = args.hash {
+        let path = std::path::Path::new(&file_to_hash);
+        if !path.exists() || !path.is_file() {
+            return Err(anyhow!("{} is not a valid file", file_to_hash));
+        }
+
+        let hash = music_deduper::Processor::get_song_hash(path)
+            .map_err(|e| anyhow!("failed to get hash for file: {e}"))?;
+        println!("{}", hash);
+        return Ok(());
+    }
 
     let files = WalkDir::new(".")
         .follow_links(true)

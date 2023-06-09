@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use blake3::Hash;
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
@@ -22,23 +24,6 @@ impl Processor {
             .duplicates_by(|(_, h1)| h1.as_bytes())
             .collect_vec();
         log::debug!("Found {} duplicates", dupes.len());
-
-        /*
-        for dupe in &dupes {
-            results
-                .iter()
-                .filter(|(p, h)| {
-                    h.as_bytes() == dupe.1.as_bytes() && p.path().to_str() != dupe.0.path().to_str()
-                })
-                .for_each(|(p, _)| {
-                    println!(
-                        "{} is a duplicate of {}",
-                        p.path().display(),
-                        dupe.0.path().display()
-                    );
-                });
-        }
-        */
 
         log::debug!("Reading duplicate files metadata...");
         let old_dupes = dupes
@@ -75,24 +60,29 @@ impl Processor {
         self.files
             .par_iter()
             .map(|f| -> anyhow::Result<(&DirEntry, Hash)> {
-                let mut ictx = ffmpeg_next::format::input(&f.path())?;
-                let input = ictx
-                    .streams()
-                    .best(ffmpeg_next::media::Type::Audio)
-                    .ok_or(ffmpeg_next::Error::StreamNotFound)?;
-                let audio_stream_index = input.index();
-
-                let mut hasher = blake3::Hasher::new();
-
-                ictx.packets().for_each(|(stream, packet)| {
-                    if stream.index() == audio_stream_index {
-                        packet.data().map(|data| hasher.update(data));
-                    }
-                });
-
-                Ok((f, hasher.finalize()))
+                let hash = Processor::get_song_hash(f.path())?;
+                Ok((f, hash))
             })
             .filter_map(Result::ok)
             .collect()
+    }
+
+    pub fn get_song_hash(path: &Path) -> anyhow::Result<Hash> {
+        let mut hasher = blake3::Hasher::new();
+
+        let mut ictx = ffmpeg_next::format::input(&path).unwrap();
+        let input = ictx
+            .streams()
+            .best(ffmpeg_next::media::Type::Audio)
+            .ok_or(ffmpeg_next::Error::StreamNotFound)?;
+
+        let audio_stream_index = input.index();
+        ictx.packets().for_each(|(stream, packet)| {
+            if stream.index() == audio_stream_index {
+                packet.data().map(|data| hasher.update(data));
+            }
+        });
+
+        Ok(hasher.finalize())
     }
 }
